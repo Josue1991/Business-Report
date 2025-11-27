@@ -1,0 +1,190 @@
+version: '3.8'
+
+services:
+  # Main API Service
+  business-report:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: business-report-api
+    ports:
+      - "3008:3008"
+    environment:
+      - NODE_ENV=production
+      - PORT=3008
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=business_report
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CLICKHOUSE_HOST=http://clickhouse:8123
+      - TIMESCALE_HOST=timescaledb
+      - TIMESCALE_PORT=5432
+      - KAFKA_BROKERS=kafka:9092
+      - MENSAJERIA_SERVICE_URL=http://business-mensajeria:3005
+      - LOG_SERVICE_URL=http://business-log:3003
+    volumes:
+      - ./storage:/app/storage
+      - ./logs:/app/logs
+      - ./ml_models:/app/ml_models
+    depends_on:
+      - mongodb
+      - redis
+      - clickhouse
+      - timescaledb
+      - kafka
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # Report Worker (BullMQ)
+  business-report-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: business-report-worker
+    command: ["node", "dist/infrastructure/workers/ReportWorker.js"]
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=business_report
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BROKERS=kafka:9092
+      - STORAGE_PATH=/app/storage/reports
+    volumes:
+      - ./storage:/app/storage
+      - ./logs:/app/logs
+    depends_on:
+      - mongodb
+      - redis
+      - kafka
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # ML Analysis Worker
+  business-report-ml-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: business-report-ml-worker
+    command: ["node", "dist/infrastructure/workers/MLAnalysisWorker.js"]
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=business_report
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENABLE_ANOMALY_DETECTION=true
+      - ENABLE_FORECASTING=true
+      - ENABLE_KPI_SUGGESTIONS=true
+    volumes:
+      - ./ml_models:/app/ml_models
+      - ./logs:/app/logs
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # MongoDB
+  mongodb:
+    image: mongo:6.0
+    container_name: business-report-mongodb
+    ports:
+      - "27019:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=business_report
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # Redis (BullMQ)
+  redis:
+    image: redis:7-alpine
+    container_name: business-report-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # ClickHouse (OLAP)
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: business-report-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      - CLICKHOUSE_DB=analytics
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-}
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # TimescaleDB (Time-Series)
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: business-report-timescaledb
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=tsdb
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${TIMESCALE_PASSWORD:-password}
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # Zookeeper (Kafka dependency)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: business-report-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - business-network
+    restart: unless-stopped
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: business-report-kafka
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - business-network
+    restart: unless-stopped
+
+networks:
+  business-network:
+    name: business-network
+    external: true
+
+volumes:
+  mongodb_data:
+  redis_data:
+  clickhouse_data:
+  timescale_data:
